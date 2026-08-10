@@ -137,3 +137,6 @@ Launch the app and switch to **Demo Mode** to see the system in action without a
 ## 📄 License
 
 MIT — free for commercial and personal use.
+
+
+CrowdSense AI is developed collaboratively by Abhishek Gaurav, Aryan Kumar and Ishan Gupta as part of our DTL project, combining our contributions to the design, development, and implementation to the project.
