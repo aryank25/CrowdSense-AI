@@ -116,6 +116,21 @@ crowd_monitor/
 
 ---
 
+## Run the logic tests
+
+From the repository root, after installing the requirements:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These tests check zone assignment, count conservation, alert thresholds and
+cooldown timing. They do not open cameras, download YOLO weights or start
+Streamlit. They test the standalone logic modules, not the separate threshold
+logic currently implemented in `app.py`.
+
+---
+
 ## 🔧 GPU Acceleration
 
 For high-resolution or multi-camera setups, GPU is recommended:
