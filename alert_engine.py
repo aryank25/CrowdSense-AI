@@ -17,7 +17,7 @@ class AlertEngine:
     def __init__(self, warn_ratio: float = 0.70, critical_ratio: float = 0.90):
         self.warn_ratio = warn_ratio
         self.critical_ratio = critical_ratio
-        self._cooldown: Dict[str, float] = {}   # key → last alert time
+        self._cooldown: Dict[str, Tuple[float, str]] = {}   # key → (last alert time, level)
         self._cooldown_secs = 5.0
 
     # ── Alert Checking ─────────────────────────────────────────────────────────
@@ -41,21 +41,21 @@ class AlertEngine:
         # Overall capacity check
         overall_key = "__overall__"
         if total_count >= total_cap * self.critical_ratio:
-            if self._can_alert(overall_key, now):
+            if self._can_alert(overall_key, now, "critical"):
                 alerts.append({
                     "level": "critical",
                     "msg": f"OVERALL CRITICAL — {total_count}/{total_cap} people detected! Immediate action required.",
                     "time": now_ts,
                 })
-                self._cooldown[overall_key] = now
+                self._cooldown[overall_key] = (now, "critical")
         elif total_count >= total_cap * self.warn_ratio:
-            if self._can_alert(overall_key, now):
+            if self._can_alert(overall_key, now, "warn"):
                 alerts.append({
                     "level": "warn",
                     "msg": f"OVERALL WARNING — {total_count}/{total_cap} people. Approaching capacity.",
                     "time": now_ts,
                 })
-                self._cooldown[overall_key] = now
+                self._cooldown[overall_key] = (now, "warn")
 
         # Per-zone checks
         for name, cap in zip(zone_names, zone_caps):
@@ -64,21 +64,21 @@ class AlertEngine:
             key = f"zone_{name}"
 
             if ratio >= self.critical_ratio:
-                if self._can_alert(key, now):
+                if self._can_alert(key, now, "critical"):
                     alerts.append({
                         "level": "critical",
                         "msg": f"{name}: {count}/{cap} people — CRITICAL DENSITY. Redirect immediately!",
                         "time": now_ts,
                     })
-                    self._cooldown[key] = now
+                    self._cooldown[key] = (now, "critical")
             elif ratio >= self.warn_ratio:
-                if self._can_alert(key, now):
+                if self._can_alert(key, now, "warn"):
                     alerts.append({
                         "level": "warn",
                         "msg": f"{name}: {count}/{cap} people — High density warning.",
                         "time": now_ts,
                     })
-                    self._cooldown[key] = now
+                    self._cooldown[key] = (now, "warn")
 
         return alerts
 
@@ -160,6 +160,57 @@ class AlertEngine:
         return suggestions[:4]
 
     # ── Helpers ────────────────────────────────────────────────────────────────
-    def _can_alert(self, key: str, now: float) -> bool:
-        last = self._cooldown.get(key, 0)
-        return (now - last) >= self._cooldown_secs
+    _SEVERITY = {"info": 0, "warn": 1, "critical": 2}
+
+    def _can_alert(self, key: str, now: float, level: str) -> bool:
+        last = self._cooldown.get(key)
+        if last is None:
+            return True
+        last_t, last_level = last
+        if now - last_t >= self._cooldown_secs:
+            return True
+        # A more severe condition (e.g. warn -> critical) fires immediately;
+        # repeats and de-escalations stay throttled.
+        return self._SEVERITY[level] > self._SEVERITY[last_level]
+
+
+def update_cycle_feedback(engine: AlertEngine, zone_names: List[str],
+                          zone_caps: List[int], current_counts: Dict[str, int],
+                          alerts_log) -> List[str]:
+    """Run one monitoring cycle of alert and routing feedback.
+
+    This is the exact path app.py wires into its monitoring loop: new engine
+    alerts are appended to alerts_log (newest first, consecutive-duplicate
+    suppressed) and the engine's routing suggestions for the cycle are
+    returned. The engine instance owns cooldown state; app.py keeps it in
+    st.session_state so cooldowns persist across reruns of one session and
+    are never shared between sessions.
+    """
+    total_count = sum(current_counts.values())
+    total_cap = sum(zone_caps)
+    for alert in engine.check(zone_names, current_counts, zone_caps,
+                              total_count, total_cap):
+        if not alerts_log or alerts_log[0]["msg"] != alert["msg"]:
+            alerts_log.appendleft({
+                "time": alert["time"],
+                "msg": alert["msg"],
+                "type": "crit" if alert["level"] == "critical" else "warn",
+            })
+    return engine.suggest(zone_names, current_counts, zone_caps,
+                          total_count, total_cap)
+
+
+def load_state(ratio: float, warn_ratio: float = 0.70,
+               critical_ratio: float = 0.90) -> str:
+    """Classify a zone load ratio for display.
+
+    Uses the same inclusive thresholds as alert classification: a zone at or
+    above warn_ratio shows the warn color whenever the zone is in the warn
+    band. The alert log is a throttled history, so its entries need not
+    reflect the current bar color.
+    """
+    if ratio >= critical_ratio:
+        return "critical"
+    if ratio >= warn_ratio:
+        return "warn"
+    return "normal"

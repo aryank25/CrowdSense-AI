@@ -18,12 +18,12 @@ if os.path.exists(UTILS_DIR) and UTILS_DIR not in sys.path:
 
 try:
     from utils.detector import CrowdDetector
-    from utils.alert_engine import AlertEngine
+    from utils.alert_engine import AlertEngine, update_cycle_feedback, load_state
     from utils.zone_manager import ZoneManager
     from utils.analytics import AnalyticsTracker
 except ModuleNotFoundError:
     from detector import CrowdDetector
-    from alert_engine import AlertEngine
+    from alert_engine import AlertEngine, update_cycle_feedback, load_state
     from zone_manager import ZoneManager
     from analytics import AnalyticsTracker
 
@@ -336,8 +336,12 @@ if "alerts_log" not in st.session_state:
 # Cached Object Constructors
 @st.cache_resource
 def get_detector(conf): return CrowdDetector(confidence=conf)
-@st.cache_resource
-def get_alert_engine(): return AlertEngine()
+def get_alert_engine():
+    # AlertEngine holds mutable per-user cooldown state, so it must stay
+    # session-local (st.cache_resource would share it across all sessions).
+    if "alert_engine" not in st.session_state:
+        st.session_state.alert_engine = AlertEngine()
+    return st.session_state.alert_engine
 
 # ─── UI Matrix Command Header ──────────────────────────────────────────────────
 st.markdown(f"""
@@ -483,23 +487,18 @@ with tab_matrix:
             view_charlie.image(processed_frames[2], use_container_width=True)
 
             placeholders = [stat_alpha, stat_bravo, stat_charlie]
-            critical_zones = []
-            available_capacities = {}
 
             for idx, config in enumerate(zones_setup):
                 z_name = config["name"]
                 count = current_counts[z_name]
                 cap = config["capacity"]
-                load_factor = min(100, int((count / cap) * 100)) if cap > 0 else 0
-                available_capacities[z_name] = max(0, cap - count)
+                ratio = (count / cap) if cap > 0 else 0
+                load_factor = min(100, int(ratio * 100))
 
-                color = "var(--neon-green)"
-                if load_factor > 90: 
-                    color = "var(--neon-red)"
-                    critical_zones.append(z_name)
-                elif load_factor > 70: 
-                    color = "var(--neon-orange)"
-                    critical_zones.append(z_name)
+                # Indicator uses the same inclusive engine thresholds as the
+                # alerts, so bar color matches the current alert classification.
+                state = load_state(ratio, alert_engine.warn_ratio, alert_engine.critical_ratio)
+                color = {"critical": "var(--neon-red)", "warn": "var(--neon-orange)"}.get(state, "var(--neon-green)")
 
                 placeholders[idx].markdown(f"""
                 <div class="cyber-panel">
@@ -516,36 +515,26 @@ with tab_matrix:
                 </div>
                 """, unsafe_allow_html=True)
 
-                if load_factor > 90:
-                    msg = f"⚠️ {z_name} CRITICAL READOUT: Overload hazard detected! ({count}/{cap})"
-                    if not st.session_state.alerts_log or st.session_state.alerts_log[0]["msg"] != msg:
-                        st.session_state.alerts_log.appendleft({"time": datetime.now().strftime("%H:%M:%S"), "msg": msg, "type": "crit"})
+
+            # Alerts and routing come from the tested AlertEngine integration
+            # path; the engine lives in session state, so its 5s per-key
+            # cooldown persists across reruns of this session only.
+            zone_names = [config["name"] for config in zones_setup]
+            zone_caps = [config["capacity"] for config in zones_setup]
+            suggestions = update_cycle_feedback(
+                alert_engine, zone_names, zone_caps, current_counts,
+                st.session_state.alerts_log)
 
             routes_html = ""
-            if critical_zones:
-                best_alternate_zone = max(available_capacities, key=available_capacities.get)
-                best_overhead = available_capacities[best_alternate_zone]
-
-                for cz in critical_zones:
-                    if cz != best_alternate_zone and best_overhead > 10:
-                        routes_html += f"""
-                        <div class="route-card">
-                            <div style="color:var(--neon-orange); font-weight:bold; font-size:0.9rem;">🔀 REDIRECTION PROTOCOL MANDATED</div>
-                            <div style="font-size:0.85rem; margin-top:6px; font-weight:600;">
-                                {cz} exceeds safety density limits. 
-                                Divert inbound crowd traffic directly towards <strong>{best_alternate_zone}</strong> ({best_overhead} slots remaining).
-                            </div>
+            if not (len(suggestions) == 1 and suggestions[0].startswith("✅")):
+                for suggestion in suggestions:
+                    routes_html += f"""
+                    <div class="route-card">
+                        <div style="font-size:0.85rem; margin-top:6px; font-weight:600;">
+                            {suggestion}
                         </div>
-                        """
-                    else:
-                        routes_html += f"""
-                        <div class="route-card" style="border-left-color: var(--neon-red);">
-                            <div style="color:var(--neon-red); font-weight:bold; font-size:0.9rem;">🛑 CRITICAL CONGESTION BLOCK</div>
-                            <div style="font-size:0.85rem; margin-top:6px; font-weight:600;">
-                                {cz} is saturated! Surrounding vector pools are thoroughly occupied. Throttle main sector intake terminals.
-                            </div>
-                        </div>
-                        """
+                    </div>
+                    """
             else:
                 routes_html = f"""
                 <div style="color:var(--text-muted); font-size:0.85rem; font-weight:700; border:1px dashed var(--panel-border); padding:20px; border-radius:8px; background: {'#ffffff' if st.session_state.theme_mode == 'Light UI Mode' else 'var(--surface-cyber)'}; text-align: center;">

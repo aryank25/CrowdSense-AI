@@ -126,8 +126,9 @@ python -m unittest discover -s tests -v
 
 These tests check zone assignment, count conservation, alert thresholds and
 cooldown timing. They do not open cameras, download YOLO weights or start
-Streamlit. They test the standalone logic modules, not the separate threshold
-logic currently implemented in `app.py`.
+Streamlit. They test the standalone logic modules, including the alert and routing
+path `app.py` uses on every monitoring cycle. They do not exercise the
+Streamlit UI, rendering or camera handling.
 
 ---
 
